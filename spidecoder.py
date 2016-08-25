@@ -1,3 +1,4 @@
+#!/usr/bin/env python2
 from __future__ import division
 import os
 import sys
@@ -55,6 +56,7 @@ def parse_quantity(text, unit=None):
 
 def dict_select(dict, *alternatives, **kws):
 	reverse = kws.get('reverse', False)
+	default = kws.get('default', None)
 
 	if reverse:
 		dict = {
@@ -72,7 +74,7 @@ def dict_select(dict, *alternatives, **kws):
 		if alt in dict:
 			return dict[alt]
 
-	return None
+	return default
 
 class SigrokFile(object):
 	def __init__(self, filename):
@@ -197,6 +199,15 @@ class SPIFlash(object):
 	def load_mask(self, srcfile):
 		self.mask = np.fromfile(srcfile, dtype=np.bool)
 
+	def erase(self, addr, length):
+		assert length > 0
+		assert length % 512 == 0
+		assert addr % length == 0
+		self.mask[addr:addr+length] = False
+		self.data[addr:addr+length] = 0xFF
+		print
+		print "erase {:06X} + {:d}".format(addr, length)
+
 	def write(self, addr, data):
 		length = len(data)
 
@@ -205,9 +216,13 @@ class SPIFlash(object):
 
 		if self.check_consistency:
 			overlap = self.mask[addr:addr+length]
-			assert not ((self.data[addr:addr+length] != data) & overlap).any()
+			#assert not ((self.data[addr:addr+length] != data) & overlap).any()
 		self.mask[addr:addr+length] = True
 		self.data[addr:addr+length] = data
+
+########################################################################
+
+# spi:miso=0:mosi=1:clk=2:cs=3
 
 infile = sys.argv[1]
 
@@ -218,10 +233,10 @@ freq = source.samplerate
 print "sample rate: {:.6f} MHz".format(freq / 1e6)
 print "probes:", json.dumps(source.probes, indent=1, sort_keys=True)
 
-ch_miso = dict_select(source.probes, 'miso', reverse=True)
-ch_mosi = dict_select(source.probes, 'mosi', reverse=True)
-ch_sclk = dict_select(source.probes, 'sclk', 'clk', reverse=True)
-ch_cs   = dict_select(source.probes, 'cs', 'cs#', '/cs', reverse=True)
+ch_miso = dict_select(source.probes, 'miso', default=0, reverse=True)
+ch_mosi = dict_select(source.probes, 'mosi', default=1, reverse=True)
+ch_sclk = dict_select(source.probes, 'sclk', 'clk', default=2, reverse=True)
+ch_cs   = dict_select(source.probes, 'cs', 'cs#', '/cs', default=3, reverse=True)
 
 assert ch_cs is not None, "Probe for CS must be labeled"
 
@@ -310,10 +325,15 @@ chip = SPIFlash()
 
 coverage = 0
 cmdcount = 0
-writecount = 0
+
 readcount = 0
-byteswritten = 0
+writecount = 0
+erasecount = 0
+
 bytesread = 0
+byteswritten = 0
+bytes_erased = 0
+
 emptycmds = 0
 lastempty = 0
 for (t, mosi, miso) in iterate_spi():
@@ -354,11 +374,31 @@ for (t, mosi, miso) in iterate_spi():
 		bytesread += len(miso_data)
 		chip.write(addr, miso_data)
 
+	elif cmd == 0x20: # sector erase
+		blocksize = 4 << 10
+		chip.erase(addr, blocksize)
+		erasecount += 1
+		bytes_erased += blocksize
+
+	elif cmd in (0xD8, 0x52): # block erase
+		blocksize = {
+			0xD8: 64 << 10,
+			0x52: 32 << 10,
+		}[cmd]
+		chip.erase(addr, blocksize)
+		erasecount += 1
+		bytes_erased += blocksize
+
+	elif cmd in (0x60, 0xc7):
+		chip.erase(0, len(chip))
+
+
 
 print
 if emptycmds: print "{} empty commands (last at {:.6f}s)".format(emptycmds, lastempty)
 print "{} read commands, total {} bytes".format(readcount, bytesread)
 print "{} write commands, total {} bytes".format(writecount, byteswritten)
+print "{} erase commands, total {} bytes".format(erasecount, bytes_erased)
 print "{} bytes covered".format(chip.mask.sum())
 print "{} bytes of memory assumed".format(len(chip))
 print "ranges:"
