@@ -147,7 +147,7 @@ class SigrokFile(object):
 
 class SPIFlash(object):
 	def __init__(self, nbytes=None, sectorsize=2**12, blocksize=2**16):
-		self.check_consistency = True
+		self.check_consistency = False
 		self.sectorsize = sectorsize
 		self.blocksize = blocksize
 		self.nbytes = 0
@@ -158,7 +158,8 @@ class SPIFlash(object):
 			assert nbytes % self.blocksize == 0
 
 		self.data = np.zeros(0, dtype=np.uint8)
-		self.mask = np.zeros(0, dtype=np.bool)
+		self.touched = np.zeros(0, dtype=np.bool)
+		self.written = np.zeros(0, dtype=np.bool)
 
 		self.resize(nbytes)
 
@@ -174,13 +175,16 @@ class SPIFlash(object):
 		self.nbytes = newbytes
 
 		newdata = np.zeros(newbytes, dtype=np.uint8)
-		newmask = np.zeros(newbytes, dtype=np.bool)
+		newtouched = np.zeros(newbytes, dtype=np.bool)
+		newwritten = np.zeros(newbytes, dtype=np.bool)
 
 		newdata[:overlap] = self.data[:overlap]
-		newmask[:overlap] = self.mask[:overlap]
+		newtouched[:overlap] = self.touched[:overlap]
+		newwritten[:overlap] = self.written[:overlap]
 
 		self.data = newdata
-		self.mask = newmask
+		self.touched = newtouched
+		self.written = newwritten
 
 
 	@classmethod
@@ -188,22 +192,28 @@ class SPIFlash(object):
 		nbytes = os.path.getsize(srcfile)
 		result = cls(nbytes=nbytes)
 		result.data = np.fromfile(srcfile, dtype=np.uint8)
-		result.mask[:] = True
 
 	def save(self, dstfile):
 		self.data.tofile(dstfile)
 
-	def save_mask(self, dstfile):
-		self.mask.tofile(dstfile)
+	def save_touched(self, dstfile):
+		self.touched.tofile(dstfile)
 
-	def load_mask(self, srcfile):
-		self.mask = np.fromfile(srcfile, dtype=np.bool)
+	def load_touched(self, srcfile):
+		self.touched = np.fromfile(srcfile, dtype=np.bool)
+
+	def save_written(self, dstfile):
+		self.written.tofile(dstfile)
+
+	def load_written(self, srcfile):
+		self.written = np.fromfile(srcfile, dtype=np.bool)
 
 	def erase(self, addr, length):
 		assert length > 0
 		assert length % 512 == 0
 		assert addr % length == 0
-		self.mask[addr:addr+length] = False
+		self.touched[addr:addr+length] = True
+		self.written[addr:addr+length] = False
 		self.data[addr:addr+length] = 0xFF
 		print
 		print "erase {:06X} + {:d}".format(addr, length)
@@ -215,10 +225,23 @@ class SPIFlash(object):
 			self.resize(len(self) * 2)
 
 		if self.check_consistency:
-			overlap = self.mask[addr:addr+length]
-			#assert not ((self.data[addr:addr+length] != data) & overlap).any()
-		self.mask[addr:addr+length] = True
+			overlap = self.written[addr:addr+length]
+			assert not ((self.data[addr:addr+length] != data) & overlap).any()
+		self.touched[addr:addr+length] = True
+		self.written[addr:addr+length] = True
 		self.data[addr:addr+length] = data
+
+def ranges_from_boolmap(boolmap):
+	diff = np.diff(boolmap)
+	
+	edges = {
+		index+1
+		for index in diff.nonzero()[0]
+	}
+	
+	if boolmap[0]: edges.add(0)
+
+	return np.uint32(sorted(edges)).reshape((-1, 2))
 
 ########################################################################
 
@@ -399,17 +422,14 @@ if emptycmds: print "{} empty commands (last at {:.6f}s)".format(emptycmds, last
 print "{} read commands, total {} bytes".format(readcount, bytesread)
 print "{} write commands, total {} bytes".format(writecount, byteswritten)
 print "{} erase commands, total {} bytes".format(erasecount, bytes_erased)
-print "{} bytes covered".format(chip.mask.sum())
+print "{} bytes touched".format(chip.touched.sum())
+print "{} bytes used".format(chip.written.sum())
 print "{} bytes of memory assumed".format(len(chip))
-print "ranges:"
-maskdiff = np.diff(chip.mask)
-edges = {
-	index+1
-	for index in maskdiff.nonzero()[0]
-}
-if chip.mask[0]: edges.add(0)
-for (u,v) in np.uint32(sorted(edges)).reshape((-1, 2)):
+print "touched:"
+for (u,v) in ranges_from_boolmap(chip.touched):
 	print "{:8x}h - {:8x}h: {:9d} bytes".format(u, v-1, v-u)
-
+print "used:"
+for (u,v) in ranges_from_boolmap(chip.written):
+	print "{:8x}h - {:8x}h: {:9d} bytes".format(u, v-1, v-u)
 chip.save(infile + ".flash")
-chip.save_mask(infile + ".mask")
+#chip.save_mask(infile + ".mask")
